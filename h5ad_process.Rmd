@@ -1,0 +1,735 @@
+---
+title: "spatial"
+output: html_document
+date: "2026-01-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+library(SeuratDisk)
+
+cleaned_path <- "/Users/vef25hok/Downloads/h5ad/"
+
+files <- c(
+    "3hpi_pathogen.h5ad",
+    "3hpi_potato.h5ad",
+    "6hpi_pathogen.h5ad",
+    "6hpi_potato.h5ad",
+    "12hpi_pathogen.h5ad",
+    "12hpi_potato.h5ad",
+    "24hpi_pathogen.h5ad",
+    "24hpi_potato.h5ad"
+)
+
+for(f in files){
+    print(paste("Converting", f))
+    
+    input_file <- paste0(cleaned_path, f)
+    
+    tryCatch({
+        Convert(
+            input_file,
+            dest = "h5seurat",
+            overwrite = TRUE,
+            assay = "RNA"
+        )
+        print(paste("  ✓ Success:", f))
+    }, error = function(e){
+        print(paste("  ✗ Failed:", f))
+        print(e)
+    })
+}
+```
+
+```{r}
+
+library(Seurat)
+library(Matrix)
+library(hdf5r)
+
+load_h5ad <- function(filepath, project_name = NULL){
+    h5file <- H5File$new(path.expand(filepath), mode = "r")
+    
+    print(paste("  Loading", basename(filepath)))
+    
+    # Extract sparse matrix
+    data <- h5file[["raw/X/data"]]$read()
+    indices <- h5file[["raw/X/indices"]]$read()
+    indptr <- h5file[["raw/X/indptr"]]$read()
+    
+    # Get dimensions
+    n_obs <- length(indptr) - 1
+    gene_names <- h5file[["raw/var/_index"]]$read()
+    n_var <- length(gene_names)
+    
+    # Reconstruct sparse matrix
+    counts <- sparseMatrix(
+        i = indices + 1,
+        p = indptr,
+        x = data,
+        dims = c(n_var, n_obs),
+        index1 = FALSE
+    )
+    
+    # Get cell names
+    cell_names <- h5file[["obs/_index"]]$read()
+    
+    colnames(counts) <- cell_names
+    rownames(counts) <- gene_names
+    
+    # Get metadata
+    metadata <- data.frame(row.names = cell_names)
+    
+    obs_items <- names(h5file[["obs"]])
+    
+    for(item in obs_items){
+        if(item == "_index") next
+        
+        tryCatch({
+            obj <- h5file[["obs"]][[item]]
+            obj_class <- class(obj)[1]
+            
+            if(obj_class == "H5D"){
+                val <- obj$read()
+                if(length(val) == n_obs){
+                    metadata[[item]] <- val
+                }
+            }
+            else if(obj_class == "H5Group"){
+                codes <- obj[["codes"]]$read()
+                categories <- obj[["categories"]]$read()
+                metadata[[item]] <- categories[codes + 1]
+            }
+        }, error = function(e){})
+    }
+    
+    # Embeddings - check dimensions first
+    pca <- h5file[["obsm/X_pca"]]$read()
+    umap <- h5file[["obsm/X_umap"]]$read()
+    
+    # Ensure correct orientation (cells should be rows)
+    if(ncol(pca) == n_obs && nrow(pca) != n_obs){
+        pca <- t(pca)
+    }
+    if(ncol(umap) == n_obs && nrow(umap) != n_obs){
+        umap <- t(umap)
+    }
+    
+    # Set rownames
+    if(nrow(pca) == n_obs){
+        rownames(pca) <- cell_names
+    }
+    if(nrow(umap) == n_obs){
+        rownames(umap) <- cell_names
+    }
+    
+    h5file$close_all()
+    
+    # Create Seurat
+    seurat_obj <- CreateSeuratObject(
+        counts = counts,
+        meta.data = metadata,
+        project = project_name
+    )
+    
+    # Add embeddings only if dimensions match
+    if(nrow(pca) == ncol(seurat_obj)){
+        seurat_obj[["pca"]] <- CreateDimReducObject(
+            embeddings = pca,
+            key = "PC_",
+            assay = "RNA"
+        )
+    }
+    
+    if(nrow(umap) == ncol(seurat_obj)){
+        seurat_obj[["umap"]] <- CreateDimReducObject(
+            embeddings = umap,
+            key = "UMAP_",
+            assay = "RNA"
+        )
+    }
+    
+    return(seurat_obj)
+}
+
+# Files
+files <- c(
+    "3hpi_pathogen", "3hpi_potato",
+    "6hpi_pathogen", "6hpi_potato",
+    "12hpi_pathogen", "12hpi_potato",
+    "24hpi_pathogen", "24hpi_potato"
+)
+
+# Process
+for(i in files){
+    print(paste("Processing:", i))
+    
+    h5ad_file <- paste0("~/Downloads/h5ad/", i, ".h5ad")
+    seurat_file <- paste0("~/Downloads/h5ad/", i, ".rds")
+    
+    tryCatch({
+        spatial_obj <- load_h5ad(h5ad_file, project_name = i)
+        saveRDS(spatial_obj, file = seurat_file)
+        print(paste("  ✓ Saved:", ncol(spatial_obj), "cells,", nrow(spatial_obj), "genes"))
+    }, error = function(e){
+        print(paste("  ✗ Error:", e$message))
+    })
+    
+    print("")
+}
+
+print("All done!")
+```
+```{r}
+patho_3hpi <- readRDS("~/Downloads/h5ad/3hpi_pathogen.rds")
+pot_3hpi <- readRDS("~/Downloads/h5ad/3hpi_potato.rds")
+patho_6hpi <- readRDS("~/Downloads/h5ad/6hpi_pathogen.rds")
+pot_6hpi <- readRDS("~/Downloads/h5ad/6hpi_potato.rds")
+patho_12hpi <- readRDS("~/Downloads/h5ad/12hpi_pathogen.rds")
+pot_12hpi <- readRDS("~/Downloads/h5ad/12hpi_potato.rds")
+patho_24hpi <- readRDS("~/Downloads/h5ad/24hpi_pathogen.rds")
+pot_24hpi <- readRDS("~/Downloads/h5ad/24hpi_potato.rds")
+```
+
+```{r}
+patho_3hpi$timepoint <- "3hpi"
+patho_3hpi$organism <- "pathogen"
+patho_3hpi$sample <- "3hpi_pathogen"
+
+pot_3hpi$timepoint <- "3hpi"
+pot_3hpi$organism <- "potato"
+pot_3hpi$sample <- "3hpi_potato"
+
+patho_6hpi$timepoint <- "6hpi"
+patho_6hpi$organism <- "pathogen"
+patho_6hpi$sample <- "6hpi_pathogen"
+
+pot_6hpi$timepoint <- "6hpi"
+pot_6hpi$organism <- "potato"
+pot_6hpi$sample <- "6hpi_potato"
+
+patho_12hpi$timepoint <- "12hpi"
+patho_12hpi$organism <- "pathogen"
+patho_12hpi$sample <- "12hpi_pathogen"
+
+pot_12hpi$timepoint <- "12hpi"
+pot_12hpi$organism <- "potato"
+pot_12hpi$sample <- "12hpi_potato"
+
+patho_24hpi$timepoint <- "24hpi"
+patho_24hpi$organism <- "pathogen"
+patho_24hpi$sample <- "24hpi_pathogen"
+
+pot_24hpi$timepoint <- "24hpi"
+pot_24hpi$organism <- "potato"
+pot_24hpi$sample <- "24hpi_potato"
+
+# Merge all samples
+combined <- merge(
+    patho_3hpi,
+    y = list(pot_3hpi, patho_6hpi, pot_6hpi, 
+             patho_12hpi, pot_12hpi, patho_24hpi, pot_24hpi),
+    add.cell.ids = c("patho_3", "pot_3", "patho_6", "pot_6",
+                     "patho_12", "pot_12", "patho_24", "pot_24")
+)
+
+# Check combined object
+combined
+table(combined$timepoint)
+table(combined$organism)
+table(combined$sample)
+
+# Standard Seurat workflow
+combined <- NormalizeData(combined)
+combined <- FindVariableFeatures(combined)
+combined <- ScaleData(combined)
+combined <- RunPCA(combined)
+combined <- FindNeighbors(combined, dims = 1:30)
+combined <- FindClusters(combined, resolution = 0.5)
+combined <- RunUMAP(combined, dims = 1:30)
+
+# Visualizations
+DimPlot(combined, reduction = "umap", group.by = "timepoint")
+DimPlot(combined, reduction = "umap", group.by = "organism")
+DimPlot(combined, reduction = "umap", split.by = "timepoint", ncol = 4)
+DimPlot(combined, reduction = "umap", split.by = "organism")
+
+```
+
+```{r}
+VlnPlot(combined, features = c("nCount_RNA", "nFeature_RNA"), group.by = "sample", pt.size = 0)
+
+
+saveRDS(combined, "~/Downloads/h5ad/combined_all_samples.rds")
+```
+
+
+
+
+```{r}
+load_h5ad_fixed <- function(filepath, project_name = NULL){
+    h5file <- H5File$new(path.expand(filepath), mode = "r")
+    
+    print(paste("  Loading", basename(filepath)))
+    
+  
+    data <- h5file[["raw/X/data"]]$read()
+    indices <- h5file[["raw/X/indices"]]$read()
+    indptr <- h5file[["raw/X/indptr"]]$read()
+    cell_names <- h5file[["obs/_index"]]$read()
+    n_obs <- length(cell_names)
+    gene_names <- h5file[["raw/var/features"]]$read() 
+    n_var <- length(gene_names)
+    counts <- sparseMatrix(
+        i = indices + 1,
+        p = indptr,
+        x = data,
+        dims = c(n_var, n_obs),
+        index1 = FALSE
+    )
+    
+    colnames(counts) <- cell_names
+    rownames(counts) <- gene_names  
+    
+    
+    metadata <- data.frame(row.names = cell_names)
+    
+    obs_items <- names(h5file[["obs"]])
+    
+    for(item in obs_items){
+        if(item == "_index") next
+        
+        tryCatch({
+            obj <- h5file[["obs"]][[item]]
+            obj_class <- class(obj)[1]
+            
+            if(obj_class == "H5D"){
+                val <- obj$read()
+                if(length(val) == n_obs){
+                    metadata[[item]] <- val
+                }
+            }
+            else if(obj_class == "H5Group"){
+                codes <- obj[["codes"]]$read()
+                categories <- obj[["categories"]]$read()
+                metadata[[item]] <- categories[codes + 1]
+            }
+        }, error = function(e){})
+    }
+    
+    # Embeddings
+    pca <- h5file[["obsm/X_pca"]]$read()
+    umap <- h5file[["obsm/X_umap"]]$read()
+    
+    if(ncol(pca) == n_obs && nrow(pca) != n_obs) pca <- t(pca)
+    if(ncol(umap) == n_obs && nrow(umap) != n_obs) umap <- t(umap)
+    
+    if(nrow(pca) == n_obs) rownames(pca) <- cell_names
+    if(nrow(umap) == n_obs) rownames(umap) <- cell_names
+    
+    h5file$close_all()
+    
+    # Create Seurat
+    seurat_obj <- CreateSeuratObject(
+        counts = counts,
+        meta.data = metadata,
+        project = project_name
+    )
+    
+    if(nrow(pca) == ncol(seurat_obj)){
+        seurat_obj[["pca"]] <- CreateDimReducObject(
+            embeddings = pca, key = "PC_", assay = "RNA"
+        )
+    }
+    
+    if(nrow(umap) == ncol(seurat_obj)){
+        seurat_obj[["umap"]] <- CreateDimReducObject(
+            embeddings = umap, key = "UMAP_", assay = "RNA"
+        )
+    }
+    
+    return(seurat_obj)
+}
+
+
+files <- c(
+    "3hpi_pathogen", "6hpi_pathogen", "12hpi_pathogen", "24hpi_pathogen"
+)
+
+for(f in files){
+    print(paste("Reloading:", f))
+    h5ad_file <- paste0("~/Downloads/h5ad/", f, ".h5ad")
+    seurat_file <- paste0("~/Downloads/h5ad/", f, "_fixed.rds")
+    
+    obj <- load_h5ad_fixed(h5ad_file, project_name = f)
+    saveRDS(obj, seurat_file)
+    
+    cat("  ✓ Gene names (first 10):", paste(head(rownames(obj), 10), collapse=", "), "\n\n")
+}
+```
+
+
+```{r}
+potato_combined <- merge(
+    pot_3hpi,
+    y = list(pot_6hpi, pot_12hpi, pot_24hpi),
+    add.cell.ids = c("3hpi", "6hpi", "12hpi", "24hpi")
+)
+
+potato_combined <- NormalizeData(potato_combined)
+potato_combined <- FindVariableFeatures(potato_combined)
+potato_combined <- ScaleData(potato_combined)
+potato_combined <- RunPCA(potato_combined)
+potato_combined <- FindNeighbors(potato_combined, dims = 1:30)
+potato_combined <- FindClusters(potato_combined, resolution = 0.5)
+potato_combined <- RunUMAP(potato_combined, dims = 1:30)
+
+DimPlot(potato_combined, reduction = "umap", group.by = "timepoint", label = TRUE)
+
+saveRDS(potato_combined, "~/Downloads/h5ad/potato_timecourse.rds")
+```
+
+
+```{r}
+library(Seurat)
+library(ggplot2)
+patho_3hpi <- readRDS("~/Downloads/h5ad/3hpi_pathogen_fixed.rds")
+patho_6hpi <- readRDS("~/Downloads/h5ad/6hpi_pathogen_fixed.rds")
+patho_12hpi <- readRDS("~/Downloads/h5ad/12hpi_pathogen_fixed.rds")
+patho_24hpi <- readRDS("~/Downloads/h5ad/24hpi_pathogen_fixed.rds")
+
+# Add metadata
+patho_3hpi$timepoint <- "3hpi"
+patho_6hpi$timepoint <- "6hpi"
+patho_12hpi$timepoint <- "12hpi"
+patho_24hpi$timepoint <- "24hpi"
+pathogen_combined <- merge(
+    patho_3hpi,
+    y = list(patho_6hpi, patho_12hpi, patho_24hpi),
+    add.cell.ids = c("3hpi", "6hpi", "12hpi", "24hpi")
+)
+
+pathogen_combined <- NormalizeData(pathogen_combined)
+pathogen_combined <- FindVariableFeatures(pathogen_combined)
+pathogen_combined <- JoinLayers(pathogen_combined)
+pathogen_combined <- ScaleData(pathogen_combined)
+pathogen_combined <- RunPCA(pathogen_combined)
+pathogen_combined <- FindNeighbors(pathogen_combined, dims = 1:30)
+pathogen_combined <- FindClusters(pathogen_combined, resolution = 0.7)
+pathogen_combined <- RunUMAP(pathogen_combined, dims = 1:30)
+
+# ===== FIND ALL MARKERS HERE (AFTER CLUSTERING) =====
+all_markers <- FindAllMarkers(pathogen_combined, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+# Save markers immediately
+write.csv(all_markers, "~/Downloads/h5ad/pathogen_all_markers.csv", row.names = FALSE)
+
+# Get top markers
+top5_per_cluster <- all_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 5, wt = avg_log2FC)
+
+print(top5_per_cluster)
+
+# ===== NOW VISUALIZE =====
+# Visualize clusters
+DimPlot(pathogen_combined, reduction = "umap", group.by = "timepoint", label = TRUE)
+DimPlot(pathogen_combined, reduction = "umap", split.by = "timepoint", ncol = 2)
+DimPlot(pathogen_combined, reduction = "umap", label = TRUE)  # By cluster
+
+# Plot top marker genes
+top_genes <- top5_per_cluster$gene[1:min(9, nrow(top5_per_cluster))]
+VlnPlot(pathogen_combined, features = top_genes, ncol = 3)
+FeaturePlot(pathogen_combined, features = top_genes[1:4])
+
+# Heatmap of top markers
+top10 <- all_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC)
+
+DoHeatmap(pathogen_combined, features = top10$gene) + NoLegend()
+
+# Find markers by timepoint
+Idents(pathogen_combined) <- "timepoint"
+timepoint_markers <- FindAllMarkers(pathogen_combined, only.pos = TRUE, min.pct = 0.25)
+write.csv(timepoint_markers, "pathogen_timepoint_markers.csv", row.names = FALSE)
+
+# Plot timepoint-specific genes
+top_time <- timepoint_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 3, wt = avg_log2FC)
+
+VlnPlot(pathogen_combined, features = top_time$gene[1:9], ncol = 3)
+
+# Save Seurat object
+saveRDS(pathogen_combined, "~/Downloads/h5ad/pathogen_combined_scaled.rds")
+
+# Save workspace
+save(pathogen_combined, all_markers, timepoint_markers, file = "~/Downloads/h5ad/pathogen_analysis.RData")
+```
+```{r}
+pdf('~/Downloads/h5ad/pathogen_combined_umap_dimplot_clusters.pdf',width=6,height=6)
+Idents(pathogen_combined) <- "seurat_clusters"
+DimPlot(pathogen_combined, reduction = "umap", group.by = "seurat_clusters", label = TRUE)
+DimPlot(pathogen_combined, reduction = "umap", split.by = "seurat_clusters", ncol = 2)
+dev.off()
+pdf('~/Downloads/h5ad/pathogen_combined_OG0000127_clusters.pdf',width=18,height=8)
+# Now you can search for specific genes
+VlnPlot(pathogen_combined, features = c("PITG-00514", "PITG-00513","PITG-19362","PITG-11731"), group.by = "seurat_clusters")
+FeaturePlot(pathogen_combined, features = c("PITG-00514", "PITG-00513","PITG-19362","PITG-11731"), split.by = "seurat_clusters")
+dev.off()
+```
+
+
+
+```{r}
+pdf('~/Downloads/h5ad/pathogen_combined_OG0000128_clusters.pdf',width=18,height=8)
+
+VlnPlot(pathogen_combined, features = c("PITG-08697", "PITG-08807","PITG-06748"), group.by = "seurat_clusters",layer='counts')
+FeaturePlot(pathogen_combined, features = c("PITG-08697", "PITG-08807","PITG-06748"), split.by = "seurat_clusters")
+dev.off()
+```
+```{r}
+top_markers <- all_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 3, wt = avg_log2FC) %>%
+    pull(gene)
+
+
+VlnPlot(pathogen_combined, features = top_markers[1:9], group.by = "timepoint", ncol = 3)
+FeaturePlot(pathogen_combined, features = top_markers[1:4], split.by = "timepoint")
+
+```
+```{r}
+gene_metadata <- data.frame(
+    gene = rownames(pathogen_combined),
+    stringsAsFactors = FALSE
+)
+
+
+gene_metadata <- left_join(gene_metadata, infeseff, by = c("gene" = "gene"))  
+gene_metadata[1:3,]
+```
+```{r}
+infeseff$gene <- gsub("_", "-", infeseff$gene)
+
+
+head(infeseff$gene, 10)
+for(pred in unique(infeseff$Prediction)){
+    effector_genes <- infeseff$gene[infeseff$Prediction == pred]
+    effector_genes <- effector_genes[effector_genes %in% rownames(pathogen_combined)]
+    
+    if(length(effector_genes) > 0){
+        cat("Adding", pred, ":", length(effector_genes), "genes\n")
+        
+        pathogen_combined <- AddModuleScore(
+            pathogen_combined,
+            features = list(effector_genes),
+            name = paste0(gsub(" |/", "_", pred), "_score")
+        )
+    } else {
+        cat("No genes found for", pred, "\n")
+    }
+}
+
+```
+
+```{r}
+grep("score", colnames(pathogen_combined@meta.data), value = TRUE)
+```
+
+```{r}
+score_cols <- grep("score", colnames(pathogen_combined@meta.data), value = TRUE)
+
+head(pathogen_combined@meta.data[, score_cols])
+
+
+FeaturePlot(pathogen_combined, features = score_cols, ncol = 3)
+VlnPlot(pathogen_combined, features = score_cols, ncol = 3, group.by = "timepoint")
+
+# By cluster
+VlnPlot(pathogen_combined, features = score_cols, ncol = 3)
+```
+```{r}
+
+pdf('~/Downloads/h5ad/pathogen_combined_dimplot_effectors_clusters.pdf',width=12,height=14)
+library(patchwork)
+
+
+
+p_clusters <- DimPlot(pathogen_combined, reduction = "umap", label = TRUE) + 
+    ggtitle("Clusters")
+
+# effector scores
+p_scores <- FeaturePlot(pathogen_combined, features = score_cols, ncol = 2)
+
+
+p_clusters / p_scores
+
+# Better: Show which clusters are enriched for each effector type
+VlnPlot(pathogen_combined, features = score_cols, ncol = 2, 
+        group.by = "seurat_clusters", pt.size = 0)
+dev.off()
+```
+
+```{r}
+p1 <- DimPlot(pathogen_combined, reduction = "umap", label = TRUE) + 
+    ggtitle("Seurat Clusters") + NoLegend()
+
+p2 <- FeaturePlot(pathogen_combined, features = score_cols[1], label = TRUE) + 
+    ggtitle(gsub("_score.*", "", score_cols[1]))
+
+p3 <- FeaturePlot(pathogen_combined, features = score_cols[2], label = TRUE) + 
+    ggtitle(gsub("_score.*", "", score_cols[2]))
+
+p4 <- VlnPlot(pathogen_combined, features = score_cols[1], group.by = "seurat_clusters", pt.size = 0) +
+    NoLegend()
+
+p5 <- VlnPlot(pathogen_combined, features = score_cols[2], group.by = "seurat_clusters", pt.size = 0)
+
+(p1 | p2 | p3) / (p4 | p5)
+
+
+ggsave("~/Downloads/h5ad/pathogen_combined_effector_by_cluster.pdf", width = 15, height = 10)
+```
+```{r}
+infes_targeff_count
+```
+
+```{r}
+orthogroup_df <- data.frame(
+  Orthogroup = c("OG0000127", "OG0000128", "OG0000279", "OG0000325", 
+                 "OG0000540", "OG0001063", "OG0001767", "OG0004578"),
+  effector_type = rep("Not predicted", 8),
+  proteins = c("PITG_00514", "PITG_06748", "PITG_18962", 
+               "PITG_10768, PITG_10769", "PITG_06841, PITG_20706",
+               "PITG_10082, PITG_03374", "PITG_19153", "PITG_05175"),
+  stringsAsFactors = FALSE
+)
+
+
+protein_list <- unlist(strsplit(orthogroup_df$proteins, ", "))
+protein_list_hyphen <- gsub("_", "-", protein_list)
+proteins_in_data <- protein_list_hyphen[protein_list_hyphen %in% rownames(pathogen_combined)]
+
+
+
+
+p_clusters <- DimPlot(pathogen_combined, reduction = "umap", label = TRUE) + 
+  ggtitle("Clusters")
+
+
+if(length(proteins_in_data) > 0) {
+  p_features <- FeaturePlot(pathogen_combined, 
+                           features = proteins_in_data, 
+                           ncol = 2,
+                           label = TRUE)
+  
+ 
+  combined_plot <- p_clusters / p_features
+  
+
+  ggsave("~/Downloads/h5ad/infes_targeff_orthogroup_umap.pdf", combined_plot, 
+         width = 8, height = 2 + 4*ceiling(length(proteins_in_data)/2))
+  
+} else {
+  cat("\nERROR: None of the proteins found in dataset!\n")
+  cat("Check gene name format.\n")
+}
+```
+
+```{r}
+piorth=read.csv("~/Downloads/PIPCAPOrthogroups.tsv",sep='\t')
+piorth[,c(1:3)]
+```
+```{r}
+picls8=FindClusters(pathogen_combined, resolution = 0.8)
+picls8=RunUMAP(picls8, dims = 1:30)
+pi_markers <- FindAllMarkers(picls8,  min.pct = 0.15)
+pimarkers_sig <- pi_markers  %>%
+  mutate(gene_fixed = gsub("-", "_", gene))
+pimarkers_sig[1:3,]
+```
+
+```{r}
+
+cl_genes711 <- clmarkers_sig2 %>%
+  filter(cluster %in% c(7, 11)) %>%
+  pull(gene_fixed)
+
+cl_orthogroups <- piorth %>%
+  filter(str_detect(Pcapsici, paste(cl_genes711, collapse = "|"))) %>%
+  select(Orthogroup, Pcapsici, Pinfestans)
+
+
+
+
+pi_orthologs <- cl_orthogroups %>%
+  mutate(pi_genes = str_split(Pinfestans, ", ")) %>%
+  unnest(pi_genes) %>%
+  filter(pi_genes != "") %>%
+  mutate(pi_genes = str_trim(pi_genes))
+
+cat("Found", nrow(pi_orthologs), "P. infestans orthologs\n")
+
+# Step 4: Find clusters for these P. infestans genes
+pi_clusters711 <- pimarkers_sig%>%
+  filter(gene_fixed %in% pi_orthologs$pi_genes) %>%
+  select(gene_fixed, cluster, avg_log2FC, pct.1, pct.2)
+
+
+```
+```{r}
+FeaturePlot(pathogen_combined, features = rownames(pi_clusters711))
+```
+```{r}
+p6=DimPlot(picls8, reduction = "umap", group.by = "timepoint", label = TRUE)
+p7=DimPlot(picls8, reduction = "umap", label = TRUE) + 
+    ggtitle("Seurat Clusters") + NoLegend()
+picls8top10 <- pi_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 8, wt = avg_log2FC)
+p8= DoHeatmap(picls8, features = picls8top10$gene) 
+p9=FeaturePlot(pathogen_combined, features = rownames(pi_clusters711))
+
+(p6 | p7 ) / (p9 ) / (p8)
+
+
+ggsave("~/Downloads/h5ad/pathogen_combined_picls8.pdf", width = 15, height = 15)
+```
+```{r}
+pipcap711=c('DVH05-025021','DVH05-007304')
+FetchData(seurat_obj, vars = c(pipcap711, "cell_type"))
+p11=VlnPlot(seurat_obj, features = pipcap711, group.by = "cell_type", ncol = 2)
+p12=FeaturePlot(seurat_obj, features = pipcap711, ncol = 2)
+(p11 ) / (p12)
+
+
+ggsave("~/Downloads/h5ad/pathogen_combined_pipcap711_fetch.pdf", width = 15, height = 15)
+```
+```{r}
+DotPlot(seurat_obj, features = pipcap711, group.by = "RXLR_group") + 
+  coord_flip()
+```
+
+
+
+
+
